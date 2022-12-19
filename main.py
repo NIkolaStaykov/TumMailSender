@@ -5,6 +5,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 
 import json
+import shutil
 from pathlib import Path
 from typing import BinaryIO
 
@@ -13,13 +14,18 @@ import re
 from tqdm import tqdm
 
 
-class ReceiverInfoManager:
+class DataManager:
     def __init__(self, student_records_path: Path, submissions_path: Path):
         self.records = pd.read_csv(student_records_path)
         self.name_pattern = re.compile(r"([\w-]+[ ]?){2,7}(?=_\d)")
         self.submissions_path = submissions_path
         self.submissions_info = {}
         self.extract_submissions_info()
+
+        self.sent_submissions_folder = submissions_path / "../Sent"
+        self.sent_submissions_folder.resolve()
+        if not self.sent_submissions_folder.exists():
+            self.sent_submissions_folder.mkdir()
 
     def names_from_submission_folder(self, submission_folder: Path) -> (str, str):
         names = self.name_pattern.search(submission_folder.as_posix()).group(0).split()
@@ -30,7 +36,7 @@ class ReceiverInfoManager:
             if self.query_records(vorname, nachname):
                 return vorname, nachname
         else:
-            raise Exception("Submission folder is named dumb")
+            raise Exception(f"Submission folder {submission_folder} is named dumb")
 
     def query_records(self, vorname: str, nachname: str) -> bool:
         if ((self.records["Vorname"] == vorname) & (self.records["Nachname"] == nachname)).any():
@@ -50,9 +56,13 @@ class ReceiverInfoManager:
                                                         "nachname": nachname,
                                                         "mail": mail_address}
 
+    def move_to_sent(self, submission_folder: Path):
+        new_path = self.sent_submissions_folder / submission_folder.name
+        self.submissions_info.pop(submission_folder)
+        submission_folder.rename(new_path)
 
 class Mail:
-    def __init__(self, sender, receiver: str, body: str, subject: str):
+    def __init__(self, sender: str, receiver: str, body: str, subject: str):
         self.message = MIMEMultipart()
         self.sender = sender
         self.receiver = receiver
@@ -116,16 +126,17 @@ def main():
     submissions_path = Path(config["submissions_path"])
 
     mail_service = MailSendingService(sender, password)
-    info_manager = ReceiverInfoManager(student_records_path, submissions_path)
+    data_manager = DataManager(student_records_path, submissions_path)
 
     subject = "Individual submission correction"
     body = open("mail_body.txt").read()
 
-    for (submission_folder, receiver_info) in tqdm(info_manager.submissions_info.items()):
+    for (submission_folder, receiver_info) in tqdm(data_manager.submissions_info.copy().items()):
         mail = Mail(sender, receiver_info["mail"], body, subject)
         pdf_path = list(submission_folder.glob("./*.pdf"))[0]
         mail.attach_pdf(pdf_path)
         mail_service.send_mail(mail)
+        data_manager.move_to_sent(submission_folder)
 
     mail_service.close_connection()
     print("Done")
